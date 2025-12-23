@@ -6,21 +6,24 @@ import { SimulationConfig } from './types';
 // Helper to define slider ranges
 const CONTROLS: Array<{ key: keyof SimulationConfig; min: number; max: number; step: number; label: string }> = [
   { key: 'NUM_ROOTS', min: 1, max: 20, step: 1, label: 'Roots' },
-  { key: 'ROOT_TIPS_COUNT', min: 1, max: 20, step: 1, label: 'Tips per Root' },
-  { key: 'MAX_TIPS', min: 50, max: 1000, step: 10, label: 'Max Active Tips' },
-  { key: 'MAX_SEGMENTS', min: 100, max: 10000, step: 100, label: 'Max Segments' },
+  { key: 'MAX_TIPS', min: 20, max: 200, step: 10, label: 'Max Active Tips' },
+  { key: 'GROWTH_SPEED', min: 0.1, max: 5, step: 0.1, label: 'Speed' },
   
-  { key: 'GROWTH_SPEED', min: 0.1, max: 10, step: 0.1, label: 'Growth Speed' },
-  { key: 'TURN_SPEED', min: 0.01, max: 1.0, step: 0.01, label: 'Turn Speed' },
-  { key: 'SENSOR_ANGLE', min: 0.1, max: 3.0, step: 0.1, label: 'Sensor Angle' },
-  { key: 'SENSOR_DIST', min: 5, max: 100, step: 1, label: 'Sensor Distance' },
-  { key: 'BRANCH_PROBABILITY', min: 0, max: 0.2, step: 0.001, label: 'Branch Chance' },
+  // Relational
+  { key: 'ATTRACTION_FORCE', min: 0, max: 0.2, step: 0.001, label: 'Curiosity (Attraction)' },
+  { key: 'ALIGNMENT_FORCE', min: 0, max: 0.2, step: 0.001, label: 'Flow (Alignment)' },
+  { key: 'REPULSION_FORCE', min: 0, max: 1.0, step: 0.01, label: 'Privacy (Repulsion)' },
+
+  // Morphology
+  { key: 'STRESS_ACCUMULATION', min: 0, max: 0.2, step: 0.001, label: 'Reaction Sensitivity' },
+  { key: 'STRESS_DECAY', min: 0, max: 0.1, step: 0.001, label: 'Relaxation Rate' },
+  { key: 'JITTER_STRENGTH', min: 0, max: 2.0, step: 0.01, label: 'Wobble Intensity' },
+  { key: 'SEGMENT_WIDTH_VAR', min: 0, max: 10, step: 0.1, label: 'Stress Width Impact' },
   
-  { key: 'SEGMENT_WIDTH_BASE', min: 0.5, max: 10, step: 0.1, label: 'Tube Width' },
-  { key: 'BASE_OPACITY', min: 0, max: 1, step: 0.01, label: 'Opacity' },
-  { key: 'DECAY_RATE', min: 0, max: 0.05, step: 0.0001, label: 'Decay Rate' },
-  
-  { key: 'SAMPLE_RADIUS', min: 1, max: 50, step: 1, label: 'Collision Radius' },
+  // Lifecycle
+  { key: 'BRANCH_PROBABILITY_BASE', min: 0, max: 0.05, step: 0.0001, label: 'Base Branching' },
+  { key: 'BRANCH_STRESS_MULTIPLIER', min: 0, max: 0.2, step: 0.001, label: 'Reactive Branching' },
+  { key: 'DECAY_RATE', min: 0.0001, max: 0.01, step: 0.0001, label: 'Fade Rate' },
 ];
 
 const App: React.FC = () => {
@@ -66,7 +69,7 @@ const App: React.FC = () => {
               <div key={ctrl.key} className="flex flex-col gap-1">
                 <div className="flex justify-between text-xs text-gray-400">
                   <label htmlFor={ctrl.key}>{ctrl.label}</label>
-                  <span>{Math.round(config[ctrl.key] * 1000) / 1000}</span>
+                  <span>{Math.round(config[ctrl.key] * 10000) / 10000}</span>
                 </div>
                 <input
                   id={ctrl.key}

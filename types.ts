@@ -12,6 +12,9 @@ export interface Tip {
   age: number;
   generation: number;
   isDead: boolean;
+  // Morphology / History state
+  interactionStress: number; // 0-1, accumulates when interacting
+  wobblePhase: number;
 }
 
 export interface TubeSegment {
@@ -24,6 +27,7 @@ export interface TubeSegment {
   width: number;
   opacity: number;
   age: number;
+  stressMarker: number; // Stored stress level at creation
 }
 
 export interface SimulationConfig {
@@ -33,23 +37,34 @@ export interface SimulationConfig {
   MAX_SEGMENTS: number;
   MAX_TIPS: number;
   
-  // Growth / Physics
+  // Physics / Behavior
   GROWTH_SPEED: number;
   TURN_SPEED: number;
-  SENSOR_ANGLE: number;
   SENSOR_DIST: number;
-  BRANCH_PROBABILITY: number;
+  SENSOR_ANGLE: number; // Used for branching angle mainly
   
+  // Relational Dynamics
+  ALIGNMENT_FORCE: number; // Tendency to flow with others
+  ATTRACTION_FORCE: number; // Tendency to move towards others (curiosity)
+  REPULSION_FORCE: number; // Personal space
+  
+  // Morphology (Character)
+  STRESS_ACCUMULATION: number; // How fast interactions change the tube form
+  STRESS_DECAY: number; // How fast it relaxes back to straight/thin
+  JITTER_STRENGTH: number; // How much stress causes wobbly movement
+  BRANCH_PROBABILITY_BASE: number;
+  BRANCH_STRESS_MULTIPLIER: number; // Stressed tubes branch more
+
   // Visuals
   SEGMENT_WIDTH_BASE: number;
+  SEGMENT_WIDTH_VAR: number; // How much stress expands the width
   BASE_OPACITY: number;
   DECAY_RATE: number;
   
   // Interaction
-  SAMPLE_RADIUS: number; // Physics radius for collision/density
+  SAMPLE_RADIUS: number;
 }
 
-// Keep generic State enum
 export enum SimulationState {
   ACTIVE,
   STAGNANT
