@@ -1,329 +1,314 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Agent, Vector, TrailPoint } from '../types';
-import { CONFIG } from '../constants';
-import { distSq, averageHue, hslToRgbString, wrap } from '../utils/math';
+import React, { useEffect, useRef } from 'react';
+import { Tip, TubeSegment, SimulationConfig } from '../types';
+import { hslToRgbString, wrap } from '../utils/math';
 
-const SimulationCanvas: React.FC = () => {
+interface Props {
+  config: SimulationConfig;
+}
+
+const SimulationCanvas: React.FC<Props> = ({ config }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const configRef = useRef<SimulationConfig>(config);
   
-  const agentsRef = useRef<Agent[]>([]);
-  const frameIdRef = useRef<number>(0);
-  const stagnationCounterRef = useRef<number>(0);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+
+  // State
+  const tipsRef = useRef<Tip[]>([]);
+  const segmentsRef = useRef<TubeSegment[]>([]);
   const idCounterRef = useRef<number>(0);
+  const frameIdRef = useRef<number>(0);
   
-  // Dynamic scaling factors
+  // Spatial partitioning for performance (simple grid)
+  // Store segment indices in grid cells
+  const gridRef = useRef<Map<string, number[]>>(new Map());
+  const cellSize = 40;
+
   const scaleRef = useRef<number>(1);
   const dimensionsRef = useRef<{ w: number, h: number }>({ w: 1000, h: 1000 });
 
-  // Initialize
-  useEffect(() => {
-    // Initial Seed - larger population for immediate effect
-    // We delay slightly to ensure dimensions are set
-    const timer = setTimeout(() => {
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        // Scale number of agents by screen area
-        const area = w * h;
-        const count = Math.min(Math.floor(area / 15000), 150); // ~130 agents for 1080p
-        
-        for (let i = 0; i < count; i++) {
-            spawnAgent({ 
-                x: w / 2 + (Math.random() - 0.5) * (w * 0.5), 
-                y: h / 2 + (Math.random() - 0.5) * (h * 0.5) 
-            });
-        }
-    }, 100);
-    
-    return () => clearTimeout(timer);
-  }, []);
-
-  const spawnAgent = (pos: Vector, forceHue?: number, forceMutation?: boolean) => {
-    const id = idCounterRef.current++;
-    
-    // Neighborhood color inheritance
-    let hue = Math.random();
-    let isMutant = false;
-
-    // Use current scale for neighborhood check radius
-    const searchRadius = CONFIG.NEIGHBOR_RADIUS_BASE * scaleRef.current;
-
-    if (forceHue !== undefined) {
-      hue = forceHue;
-    } else if (agentsRef.current.length > 0) {
-      // Find nearby
-      const nearbyHues: number[] = [];
-      for (const a of agentsRef.current) {
-        if (distSq(pos, a.pos) < searchRadius * searchRadius) {
-          nearbyHues.push(a.hue);
-        }
-      }
-
-      if (nearbyHues.length > 0) {
-        hue = averageHue(nearbyHues);
-        
-        // Mutation
-        if (forceMutation || Math.random() < CONFIG.MUTATION_CHANCE) {
-          hue = (hue + 0.5) % 1.0; // Opposite color
-          isMutant = true;
-        } else {
-            // Small drift
-            hue = (hue + (Math.random() - 0.5) * 0.03 + 1.0) % 1.0;
-        }
-      }
-    }
-
-    const newAgent: Agent = {
-      id,
-      pos: { ...pos },
-      vel: { x: (Math.random() - 0.5), y: (Math.random() - 0.5) },
-      hue,
-      energy: 0.8 + Math.random() * 0.2,
-      age: 0,
-      isDead: false,
-      trail: [],
-      neighborsCount: 0,
-      mutationFactor: isMutant ? 1 : 0
-    };
-
-    agentsRef.current.push(newAgent);
+  const getGridKey = (x: number, y: number) => {
+      const gx = Math.floor(x / cellSize);
+      const gy = Math.floor(y / cellSize);
+      return `${gx},${gy}`;
   };
 
-  const handleCanvasClick = (e: React.MouseEvent) => {
-    if (!canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    // Spawn a small burst
-    for(let i=0; i<3; i++) {
-        spawnAgent({ 
-            x: x + (Math.random() - 0.5) * 20, 
-            y: y + (Math.random() - 0.5) * 20 
-        });
-    }
+  const addToGrid = (seg: TubeSegment, idx: number) => {
+      // Add start and end points
+      const k1 = getGridKey(seg.x1, seg.y1);
+      const k2 = getGridKey(seg.x2, seg.y2);
+      
+      if (!gridRef.current.has(k1)) gridRef.current.set(k1, []);
+      gridRef.current.get(k1)!.push(idx);
+
+      if (k1 !== k2) {
+          if (!gridRef.current.has(k2)) gridRef.current.set(k2, []);
+          gridRef.current.get(k2)!.push(idx);
+      }
   };
 
-  // Main Loop
+  // --- Spawning ---
+  // Returns true if successful, false if limit reached
+  const spawnTip = (x: number, y: number, heading: number, hue: number, gen: number, targetArray?: Tip[]): boolean => {
+      const cfg = configRef.current;
+      // Check total population limit (current active + any buffered new ones)
+      const currentCount = tipsRef.current.length + (targetArray ? targetArray.length : 0);
+      
+      if (currentCount >= cfg.MAX_TIPS) {
+        return false;
+      }
+
+      const newTip: Tip = {
+          id: idCounterRef.current++,
+          pos: { x, y },
+          heading,
+          hue,
+          energy: 1.0,
+          age: 0,
+          generation: gen,
+          isDead: false
+      };
+
+      if (targetArray) {
+          targetArray.push(newTip);
+      } else {
+          tipsRef.current.push(newTip);
+      }
+      return true;
+  };
+
+  const initSimulation = () => {
+      const w = dimensionsRef.current.w;
+      const h = dimensionsRef.current.h;
+      if (w === 0 || h === 0) return;
+
+      const cfg = configRef.current;
+      tipsRef.current = [];
+      segmentsRef.current = [];
+      gridRef.current.clear();
+
+      for (let i = 0; i < cfg.NUM_ROOTS; i++) {
+          const rx = Math.random() * w;
+          const ry = Math.random() * h;
+          const baseHue = Math.random();
+
+          for (let j = 0; j < cfg.ROOT_TIPS_COUNT; j++) {
+              const angle = Math.random() * Math.PI * 2;
+              spawnTip(rx, ry, angle, baseHue, 0);
+          }
+      }
+  };
+
+  // --- Sensing Algorithm (The "Search" part) ---
+  // Returns the best heading adjustment (-1: left, 0: straight, 1: right)
+  const senseEnvironment = (tip: Tip, scale: number): number => {
+      const cfg = configRef.current;
+      const sensorDist = cfg.SENSOR_DIST * scale;
+      const angle = cfg.SENSOR_ANGLE;
+
+      const angles = [
+          tip.heading - angle, // Left
+          tip.heading,         // Center
+          tip.heading + angle  // Right
+      ];
+
+      const densities = angles.map(a => {
+          const sx = tip.pos.x + Math.cos(a) * sensorDist;
+          const sy = tip.pos.y + Math.sin(a) * sensorDist;
+          
+          // Query grid for density
+          const key = getGridKey(sx, sy);
+          const indices = gridRef.current.get(key);
+          if (!indices) return 0;
+          
+          // Count distinct segments in range
+          let count = 0;
+          const rSq = (cfg.SAMPLE_RADIUS * scale) ** 2;
+          for (const idx of indices) {
+              const seg = segmentsRef.current[idx];
+              if (!seg) continue;
+              // Distance to segment midpoint approx
+              const mx = (seg.x1 + seg.x2) / 2;
+              const my = (seg.y1 + seg.y2) / 2;
+              const d = (sx - mx)**2 + (sy - my)**2;
+              if (d < rSq) count++;
+          }
+          return count;
+      });
+
+      // Greedy choice: lowest density
+      const minDensity = Math.min(...densities);
+      
+      // If all blocked, random or die?
+      if (minDensity > 5) return (Math.random() - 0.5) * 2; // Panic
+
+      // Prefer keeping straight if density is equal
+      if (densities[1] === minDensity) return 0;
+      if (densities[0] === minDensity) return -1;
+      return 1;
+  };
+
   const update = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
 
-    const width = dimensionsRef.current.w;
-    const height = dimensionsRef.current.h;
-    const scale = scaleRef.current;
+      const cfg = configRef.current;
+      const w = dimensionsRef.current.w;
+      const h = dimensionsRef.current.h;
+      const scale = scaleRef.current;
 
-    // Scaled Parameters
-    const neighborRadius = CONFIG.NEIGHBOR_RADIUS_BASE * scale;
-    const agentRadius = CONFIG.AGENT_RADIUS_BASE * scale;
-    const maxSpeed = CONFIG.MAX_SPEED_BASE * scale;
-    const trailLengthMax = CONFIG.TRAIL_LENGTH_BASE * (scale * 1.5); // Trails scale slightly more
-    const repulsionDist = agentRadius * 4;
+      // 1. Update Tips
+      const speed = cfg.GROWTH_SPEED * scale;
+      const newSegments: TubeSegment[] = [];
+      const newTipsBuffer: Tip[] = [];
 
-    // Fade effect
-    ctx.fillStyle = 'rgba(5, 5, 5, 0.15)'; 
-    ctx.fillRect(0, 0, width, height);
+      // Create a snapshot of current tips to iterate over. 
+      // This prevents the loop from processing newly spawned tips in the same frame (infinite loop prevention)
+      // and keeps performance predictable.
+      const activeTips = tipsRef.current;
 
-    const agents = agentsRef.current;
-    let totalVelocity = 0;
+      for (const tip of activeTips) {
+          if (tip.isDead) continue;
 
-    // --- Spatial Awareness & Physics ---
-    for (let i = 0; i < agents.length; i++) {
-        const a = agents[i];
-        if (a.isDead) continue;
+          // Search / Sense
+          const turnDir = senseEnvironment(tip, scale);
+          tip.heading += turnDir * cfg.TURN_SPEED;
+          
+          // Wiggle
+          tip.heading += (Math.random() - 0.5) * 0.1;
 
-        let neighbors = 0;
-        let avgVelX = 0;
-        let avgVelY = 0;
-        let avgPosX = 0;
-        let avgPosY = 0;
-        let separateX = 0;
-        let separateY = 0;
+          // Move
+          const oldX = tip.pos.x;
+          const oldY = tip.pos.y;
+          
+          tip.pos.x += Math.cos(tip.heading) * speed;
+          tip.pos.y += Math.sin(tip.heading) * speed;
 
-        for (let j = 0; j < agents.length; j++) {
-            if (i === j) continue;
-            const b = agents[j];
-            if (b.isDead) continue;
+          // Wrap (Simulation of infinite petri dish)
+          // To make segments look good on wrap, we break the segment.
+          let wrapped = false;
+          if (tip.pos.x < 0 || tip.pos.x > w || tip.pos.y < 0 || tip.pos.y > h) {
+             tip.pos.x = wrap(tip.pos.x, 0, w);
+             tip.pos.y = wrap(tip.pos.y, 0, h);
+             wrapped = true;
+          }
 
-            const dx = a.pos.x - b.pos.x;
-            const dy = a.pos.y - b.pos.y;
-            
-            // Simple wrap-around distance check approximation
-            // (Strict wrap distance is expensive, skipping for performance/minimalism)
-            if (Math.abs(dx) > neighborRadius || Math.abs(dy) > neighborRadius) continue;
+          if (!wrapped) {
+              // Create Segment
+              const seg: TubeSegment = {
+                  id: idCounterRef.current++,
+                  x1: oldX,
+                  y1: oldY,
+                  x2: tip.pos.x,
+                  y2: tip.pos.y,
+                  hue: tip.hue,
+                  width: Math.max(0.5, cfg.SEGMENT_WIDTH_BASE * scale * (1 - tip.generation * 0.05)),
+                  opacity: 1.0,
+                  age: 0
+              };
+              newSegments.push(seg);
 
-            const dSq = dx*dx + dy*dy;
+              // Branching
+              if (Math.random() < cfg.BRANCH_PROBABILITY && tip.generation < 10) {
+                  const branchAngle = tip.heading + (Math.random() < 0.5 ? -1 : 1) * cfg.SENSOR_ANGLE;
+                  // Hue shift
+                  const newHue = (tip.hue + (Math.random() - 0.5) * 0.1 + 1) % 1.0;
+                  // Spawn into buffer, not directly into tipsRef.current
+                  spawnTip(tip.pos.x, tip.pos.y, branchAngle, newHue, tip.generation + 1, newTipsBuffer);
+              }
+          }
 
-            // Neighbor Influence
-            if (dSq < neighborRadius * neighborRadius) {
-                neighbors++;
-                
-                // Alignment accumulator
-                avgVelX += b.vel.x;
-                avgVelY += b.vel.y;
+          tip.age++;
+          // Random death based on age or density?
+          // Let's rely on sensing density. If stuck, maybe stop?
+          if (tip.age > 1000) tip.isDead = true; 
+      }
 
-                // Cohesion accumulator
-                avgPosX += b.pos.x;
-                avgPosY += b.pos.y;
-                
-                // Separation
-                if (dSq < repulsionDist * repulsionDist && dSq > 0.01) {
-                    const d = Math.sqrt(dSq);
-                    const force = (repulsionDist - d) / repulsionDist;
-                    separateX += (dx / d) * force;
-                    separateY += (dy / d) * force;
-                }
-            }
-        }
+      // Merge Buffer
+      if (newTipsBuffer.length > 0) {
+          tipsRef.current.push(...newTipsBuffer);
+      }
 
-        a.neighborsCount = neighbors;
+      // Add new segments
+      for (const s of newSegments) {
+          const idx = segmentsRef.current.push(s) - 1;
+          addToGrid(s, idx);
+      }
 
-        // --- Apply Rules ---
-        
-        // 1. Steering
-        if (neighbors > 0) {
-            // Alignment (match velocity)
-            a.vel.x += (avgVelX / neighbors) * CONFIG.ALIGNMENT_FORCE;
-            a.vel.y += (avgVelY / neighbors) * CONFIG.ALIGNMENT_FORCE;
+      // 2. Segment Management (Limit & Decay)
+      // Soft limit: decay opacity if too many
+      const totalSegments = segmentsRef.current.length;
+      if (totalSegments > cfg.MAX_SEGMENTS) {
+          // Remove oldest chunks
+          const removeCount = Math.floor(totalSegments * 0.05) + 1; // Remove 5%
+          segmentsRef.current.splice(0, removeCount);
+          
+          gridRef.current.clear();
+          segmentsRef.current.forEach((s, i) => addToGrid(s, i));
+      }
+      
+      // Decay opacity of older segments
+      for (const seg of segmentsRef.current) {
+          seg.age++;
+          seg.opacity -= cfg.DECAY_RATE;
+      }
+      // Remove invisible
+      const beforeCount = segmentsRef.current.length;
+      segmentsRef.current = segmentsRef.current.filter(s => s.opacity > 0.05);
+      if (segmentsRef.current.length !== beforeCount) {
+          gridRef.current.clear();
+          segmentsRef.current.forEach((s, i) => addToGrid(s, i));
+      }
 
-            // Cohesion (move to center of group)
-            const centerX = avgPosX / neighbors;
-            const centerY = avgPosY / neighbors;
-            const dirX = centerX - a.pos.x;
-            const dirY = centerY - a.pos.y;
-            // Normalize direction approx
-            a.vel.x += dirX * CONFIG.COHESION_FORCE;
-            a.vel.y += dirY * CONFIG.COHESION_FORCE;
-        }
+      // Cleanup Tips
+      tipsRef.current = tipsRef.current.filter(t => !t.isDead && t.age < 2000);
+      
+      // Respawn if empty
+      if (tipsRef.current.length < 2) {
+          const rx = Math.random() * w;
+          const ry = Math.random() * h;
+          spawnTip(rx, ry, Math.random() * Math.PI*2, Math.random(), 0);
+      }
 
-        // Random Wander
-        a.vel.x += (Math.random() - 0.5) * CONFIG.WANDER_STRENGTH * scale;
-        a.vel.y += (Math.random() - 0.5) * CONFIG.WANDER_STRENGTH * scale;
+      // 3. Render
+      // Clear slightly for trails? No, we draw segments directly.
+      // Clear completely
+      ctx.fillStyle = '#050505';
+      ctx.fillRect(0, 0, w, h);
 
-        // Separation (avoid crowding)
-        a.vel.x += separateX * CONFIG.REPULSION_FORCE;
-        a.vel.y += separateY * CONFIG.REPULSION_FORCE;
+      // Draw Segments
+      ctx.lineCap = 'round';
+      for (const seg of segmentsRef.current) {
+          ctx.beginPath();
+          ctx.moveTo(seg.x1, seg.y1);
+          ctx.lineTo(seg.x2, seg.y2);
+          ctx.lineWidth = seg.width;
+          // Color logic: HSL
+          ctx.strokeStyle = hslToRgbString(seg.hue, 0.7, 0.5, seg.opacity);
+          ctx.stroke();
+      }
 
-        // 2. Life & Energy
-        let energyDelta = -0.0005; // Tiny metabolic cost
+      // Draw Active Tips (Glowing heads)
+      for (const tip of tipsRef.current) {
+          ctx.beginPath();
+          ctx.arc(tip.pos.x, tip.pos.y, (cfg.SEGMENT_WIDTH_BASE + 1) * scale, 0, Math.PI * 2);
+          ctx.fillStyle = hslToRgbString(tip.hue, 1.0, 0.7, 1.0);
+          ctx.fill();
+          
+          // Debug Sensors?
+          // ctx.beginPath();
+          // ctx.moveTo(tip.pos.x, tip.pos.y);
+          // ctx.lineTo(tip.pos.x + Math.cos(tip.heading)*20, tip.pos.y + Math.sin(tip.heading)*20);
+          // ctx.strokeStyle = 'white';
+          // ctx.lineWidth = 1;
+          // ctx.stroke();
+      }
 
-        if (neighbors >= CONFIG.IDEAL_NEIGHBORS_MIN && neighbors <= CONFIG.IDEAL_NEIGHBORS_MAX) {
-            energyDelta += CONFIG.ENERGY_GAIN_RATE;
-        } else if (neighbors > CONFIG.CROWD_LIMIT) {
-            energyDelta -= CONFIG.ENERGY_LOSS_RATE * 1.5;
-        } else if (neighbors < 1) {
-            energyDelta -= CONFIG.ENERGY_LOSS_RATE;
-        }
-
-        a.energy = Math.min(Math.max(a.energy + energyDelta, 0), 1);
-        a.age++;
-
-        // 3. Death
-        let deathChance = CONFIG.DEATH_CHANCE_BASE;
-        if (a.energy <= 0.01) deathChance = 0.02; // Starvation
-        if (a.age > CONFIG.MAX_AGE) deathChance += 0.005; // Old age
-
-        if (Math.random() < deathChance) {
-            a.isDead = true;
-        }
-
-        // 4. Physics Integration
-        a.vel.x *= CONFIG.FRICTION;
-        a.vel.y *= CONFIG.FRICTION;
-
-        // Speed Limit
-        const speedSq = a.vel.x * a.vel.x + a.vel.y * a.vel.y;
-        if (speedSq > maxSpeed * maxSpeed) {
-            const currentSpeed = Math.sqrt(speedSq);
-            a.vel.x = (a.vel.x / currentSpeed) * maxSpeed;
-            a.vel.y = (a.vel.y / currentSpeed) * maxSpeed;
-        }
-
-        a.pos.x += a.vel.x;
-        a.pos.y += a.vel.y;
-
-        // Screen Wrap
-        a.pos.x = wrap(a.pos.x, 0, width);
-        a.pos.y = wrap(a.pos.y, 0, height);
-
-        totalVelocity += Math.sqrt(speedSq);
-    }
-
-    // --- Stagnation ---
-    const avgSystemSpeed = agents.length > 0 ? totalVelocity / agents.length : 0;
-    if (agents.length > 10 && avgSystemSpeed < CONFIG.STAGNATION_VELOCITY_THRESHOLD * scale) {
-        stagnationCounterRef.current++;
-        if (stagnationCounterRef.current > CONFIG.STAGNATION_FRAMES_TRIGGER) {
-            stagnationCounterRef.current = 0;
-            // Rare event
-            spawnAgent({ x: Math.random() * width, y: Math.random() * height }, Math.random(), true);
-        }
-    } else {
-        stagnationCounterRef.current = Math.max(0, stagnationCounterRef.current - 1);
-    }
-
-    // --- Drawing ---
-    agents.forEach(a => {
-        // Update Trail
-        if (!a.isDead) {
-            a.trail.unshift({ x: a.pos.x, y: a.pos.y, opacity: 1 });
-            if (a.trail.length > trailLengthMax) a.trail.pop();
-        } else {
-            // Fast decay if dead
-            if (a.trail.length > 0) a.trail.pop();
-            if (a.trail.length > 0) a.trail.pop();
-        }
-
-        // Draw Trail
-        if (a.trail.length > 1) {
-            ctx.beginPath();
-            ctx.moveTo(a.trail[0].x, a.trail[0].y);
-            // Draw every point for smoothness
-            for (let t = 1; t < a.trail.length; t++) {
-                ctx.lineTo(a.trail[t].x, a.trail[t].y);
-            }
-            
-            const lightness = a.isDead ? 0.2 : 0.4 + (a.energy * 0.3);
-            const saturation = a.mutationFactor > 0.5 ? 0.9 : 0.6;
-            const alpha = a.isDead ? 0.1 : CONFIG.BASE_OPACITY * (a.energy > 0.5 ? 1 : 0.5);
-            
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.strokeStyle = hslToRgbString(a.hue, saturation, lightness, alpha);
-            ctx.lineWidth = CONFIG.TRAIL_WIDTH_BASE * scale;
-            ctx.stroke();
-        }
-
-        // Draw Head (only if healthy or new)
-        if (!a.isDead && a.trail.length < 5) {
-            ctx.beginPath();
-            ctx.arc(a.pos.x, a.pos.y, agentRadius, 0, Math.PI * 2);
-            ctx.fillStyle = hslToRgbString(a.hue, 0.8, 0.6, 1);
-            ctx.fill();
-        }
-    });
-
-    // Cleanup
-    agentsRef.current = agents.filter(a => !a.isDead || a.trail.length > 0);
-    
-    // Rare autonomous birth
-    if (agents.length < 300 && Math.random() < 0.05) {
-         const randomAgent = agents[Math.floor(Math.random() * agents.length)];
-         if (randomAgent && !randomAgent.isDead && 
-             randomAgent.neighborsCount >= 3 && 
-             randomAgent.neighborsCount <= 5 &&
-             randomAgent.energy > 0.9) {
-             
-             spawnAgent({
-                 x: randomAgent.pos.x + (Math.random() - 0.5) * 10 * scale,
-                 y: randomAgent.pos.y + (Math.random() - 0.5) * 10 * scale
-             });
-         }
-    }
-
-    frameIdRef.current = requestAnimationFrame(update);
+      frameIdRef.current = requestAnimationFrame(update);
   };
 
   useEffect(() => {
@@ -337,16 +322,21 @@ const SimulationCanvas: React.FC = () => {
         canvasRef.current.height = h;
         dimensionsRef.current = { w, h };
         
-        // Calculate Scale
-        // Base scale: 1.0 at 1920x1080 (approx 2M pixels)
-        // Scaled down for mobile, slightly up for 4k
         const diagonal = Math.sqrt(w*w + h*h);
         scaleRef.current = Math.max(0.5, Math.min(2.5, diagonal / 1200));
+
+        // Restart sim on massive resize to keep scale logic simple
+        initSimulation();
     });
 
     if (containerRef.current) {
         resizeObserver.observe(containerRef.current);
     }
+    
+    // Initial Spawn delayed
+    setTimeout(() => {
+        if (tipsRef.current.length === 0) initSimulation();
+    }, 100);
 
     frameIdRef.current = requestAnimationFrame(update);
 
@@ -356,6 +346,18 @@ const SimulationCanvas: React.FC = () => {
     };
   }, []);
 
+  const handleCanvasClick = (e: React.MouseEvent) => {
+    if (!canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    // Spawn a new root at click
+    for(let i=0; i<5; i++) {
+        spawnTip(x, y, Math.random()*Math.PI*2, Math.random(), 0);
+    }
+  };
+
   return (
     <div ref={containerRef} className="w-full h-full relative cursor-crosshair">
       <canvas
@@ -364,7 +366,7 @@ const SimulationCanvas: React.FC = () => {
         className="w-full h-full block"
       />
       <div className="absolute top-4 left-6 pointer-events-none select-none opacity-50 mix-blend-difference">
-        <h1 className="text-white text-xs tracking-[0.2em] font-light uppercase">Lumina Field</h1>
+        <h1 className="text-white text-xs tracking-[0.2em] font-light uppercase">Neural Growth</h1>
       </div>
     </div>
   );

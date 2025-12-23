@@ -1,37 +1,24 @@
-export const CONFIG = {
-  // Visuals (Base values, to be scaled by screen size)
-  TRAIL_LENGTH_BASE: 30,
-  AGENT_RADIUS_BASE: 2,
-  TRAIL_WIDTH_BASE: 1.5,
-  BASE_OPACITY: 0.6,
+import { SimulationConfig } from './types';
+
+export const CONFIG: SimulationConfig = {
+  // System
+  NUM_ROOTS: 3,
+  ROOT_TIPS_COUNT: 5,
+  MAX_SEGMENTS: 3000,
+  MAX_TIPS: 150, // Prevents freezing
   
-  // Physics & Neighborhood (Base values)
-  NEIGHBOR_RADIUS_BASE: 80, 
-  IDEAL_NEIGHBORS_MIN: 3,
-  IDEAL_NEIGHBORS_MAX: 10,
-  CROWD_LIMIT: 25, // Higher crowd limit for clustering
+  // Growth / Physics (Base values)
+  GROWTH_SPEED: 2.0,
+  TURN_SPEED: 0.2,
+  SENSOR_ANGLE: 0.7, // Radians (~40 degrees)
+  SENSOR_DIST: 30,
+  BRANCH_PROBABILITY: 0.015,
   
-  // Movement
-  MAX_SPEED_BASE: 2.0,
-  FRICTION: 0.92,
-  WANDER_STRENGTH: 0.1,
-  REPULSION_FORCE: 0.15,
-  ALIGNMENT_FORCE: 0.06, // Steer same direction as neighbors
-  COHESION_FORCE: 0.008, // Steer towards neighbors (clustering)
+  // Visuals
+  SEGMENT_WIDTH_BASE: 2.0,
+  BASE_OPACITY: 0.8,
+  DECAY_RATE: 0.002,
   
-  // Life Cycle
-  AGE_DECAY: 0, // Disable age-based energy loss
-  ENERGY_GAIN_RATE: 0.005, // Fast recovery in groups
-  ENERGY_LOSS_RATE: 0.003, // Slow loss when alone
-  DEATH_CHANCE_BASE: 0.0001, // 1 in 10,000 frames (~3 mins at 60fps)
-  DEATH_CHANCE_STAGNANT: 0.0005,
-  MAX_AGE: 15000, // ~4 minutes
-  
-  // Stagnation
-  STAGNATION_VELOCITY_THRESHOLD: 0.3,
-  STAGNATION_FRAMES_TRIGGER: 600,
-  
-  // Mutation
-  MUTATION_CHANCE: 0.05,
-  MUTATION_SEVERITY: 0.5,
+  // Interaction
+  SAMPLE_RADIUS: 10,
 };
