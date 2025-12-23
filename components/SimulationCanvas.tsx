@@ -1,29 +1,37 @@
+// ryuta0201/luminafield/luminaField.../components/SimulationCanvas.tsx
 import React, { useEffect, useRef } from 'react';
-import { Tip, TubeSegment, SimulationConfig } from '../types';
+import { Tip, TubeSegment, SimulationConfig, AtmosphereState } from '../types';
 import { hslToRgbString, wrap } from '../utils/math';
+import { initAtmosphere, updateAtmosphere, getAtmosphereDescription } from '../utils/atmosphere';
 
 interface Props {
   config: SimulationConfig;
+  onAtmosphereChange?: (descriptors: string[]) => void;
 }
 
-const SimulationCanvas: React.FC<Props> = ({ config }) => {
+const SimulationCanvas: React.FC<Props> = ({ config, onAtmosphereChange }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  
+  // 設定のRef（Propsから受け取るが、内部でアトラクタによって上書きされるベース値）
   const configRef = useRef<SimulationConfig>(config);
   
   useEffect(() => {
     configRef.current = config;
   }, [config]);
 
-  // State
+  // 天候（数学モデル）の状態
+  const atmosphereRef = useRef<AtmosphereState>(initAtmosphere());
+  
+  // シミュレーション状態
   const tipsRef = useRef<Tip[]>([]);
   const segmentsRef = useRef<TubeSegment[]>([]);
   const idCounterRef = useRef<number>(0);
   const frameIdRef = useRef<number>(0);
   
-  // Spatial partitioning
+  // 空間分割（Grid）
   const gridRef = useRef<Map<string, number[]>>(new Map());
-  const cellSize = 50;
+  const cellSize = 60; // 少し広げて探索回数を減らす
 
   const scaleRef = useRef<number>(1);
   const dimensionsRef = useRef<{ w: number, h: number }>({ w: 1000, h: 1000 });
@@ -37,21 +45,16 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
   const addToGrid = (seg: TubeSegment, idx: number) => {
       const k1 = getGridKey(seg.x1, seg.y1);
       const k2 = getGridKey(seg.x2, seg.y2);
-      
       if (!gridRef.current.has(k1)) gridRef.current.set(k1, []);
       gridRef.current.get(k1)!.push(idx);
-
       if (k1 !== k2) {
           if (!gridRef.current.has(k2)) gridRef.current.set(k2, []);
           gridRef.current.get(k2)!.push(idx);
       }
   };
 
-  const spawnTip = (x: number, y: number, heading: number, hue: number, gen: number, targetArray?: Tip[]): boolean => {
-      const cfg = configRef.current;
-      const currentCount = tipsRef.current.length + (targetArray ? targetArray.length : 0);
-      
-      if (currentCount >= cfg.MAX_TIPS) return false;
+  const spawnTip = (x: number, y: number, heading: number, hue: number, gen: number, targetArray?: Tip[]) => {
+      if (tipsRef.current.length >= configRef.current.SAFETY_TIPS_LIMIT) return;
 
       const newTip: Tip = {
           id: idCounterRef.current++,
@@ -68,7 +71,6 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
 
       if (targetArray) targetArray.push(newTip);
       else tipsRef.current.push(newTip);
-      return true;
   };
 
   const initSimulation = () => {
@@ -76,58 +78,66 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
       const h = dimensionsRef.current.h;
       if (w === 0 || h === 0) return;
 
-      const cfg = configRef.current;
+      // Reset
       tipsRef.current = [];
       segmentsRef.current = [];
       gridRef.current.clear();
+      atmosphereRef.current = initAtmosphere(); // 新しい数式モデルを選出
 
-      for (let i = 0; i < cfg.NUM_ROOTS; i++) {
-          const rx = Math.random() * w;
-          const ry = Math.random() * h;
-          // Use more natural, desaturated hues for a "garden" feel
-          const baseHue = Math.random(); 
-
-          for (let j = 0; j < cfg.ROOT_TIPS_COUNT; j++) {
-              const angle = Math.random() * Math.PI * 2;
-              spawnTip(rx, ry, angle, baseHue, 0);
-          }
+      // 初期配置：花火のように中心から散らばる
+      const centerX = w / 2;
+      const centerY = h / 2;
+      
+      // 複数のクラスターを作る
+      for(let k=0; k<3; k++) {
+        const clusterX = centerX + (Math.random() - 0.5) * w * 0.5;
+        const clusterY = centerY + (Math.random() - 0.5) * h * 0.5;
+        const baseHue = Math.random();
+        
+        for (let i = 0; i < 12; i++) {
+            const angle = (Math.PI * 2 * i) / 12 + Math.random() * 0.5;
+            spawnTip(clusterX, clusterY, angle, baseHue, 0);
+        }
       }
   };
 
-  // --- Relational Dynamics Engine ---
-  // Returns: { steeringAdjustment, stressImpact }
-  const calculateDynamics = (tip: Tip, scale: number): { steer: number, stress: number } => {
+  // --- Physics Engine ---
+  const calculateDynamics = (tip: Tip, scale: number, globalModulation: number) => {
       const cfg = configRef.current;
       const senseRad = cfg.SENSOR_DIST * scale;
-      const avoidRad = cfg.SAMPLE_RADIUS * scale;
-      const grid = gridRef.current;
-
-      // Vectors accumulators
-      let alignX = 0, alignY = 0; // Alignment: Match direction of neighbors
-      let attractX = 0, attractY = 0; // Attraction: Move towards neighbors
-      let repelX = 0, repelY = 0; // Repulsion: Avoid collision
+      const avoidRad = cfg.SAMPLE_RADIUS * scale; // 衝突回避半径
       
-      let neighborCount = 0;
-      let closeCount = 0;
-      let maxLocalStress = 0; // The "scent" of previous reactions
+      // アトラクタの影響をパラメータに適用
+      // modulation (0~1) が高いとき -> 整列強、速度速、直進的 (Flow)
+      // modulation (0~1) が低いとき -> 探索強、速度遅、カオス的 (Curious)
+      
+      const currentSpeed = cfg.GROWTH_SPEED * (0.5 + globalModulation);
+      const currentAlign = cfg.ALIGNMENT_FORCE * (0.2 + globalModulation * 0.8); 
+      const currentTurn = cfg.TURN_SPEED * (1.5 - globalModulation * 0.5); // Flow時は急旋回しない
 
-      // 1. Query Grid
-      // Check 3x3 grid cells around tip
+      // Grid Search
       const gx = Math.floor(tip.pos.x / cellSize);
       const gy = Math.floor(tip.pos.y / cellSize);
       const candidates = new Set<number>();
-
+      
+      // 近傍9セルのみ探索
       for(let i = -1; i <= 1; i++) {
         for(let j = -1; j <= 1; j++) {
             const key = `${gx+i},${gy+j}`;
-            const cell = grid.get(key);
+            const cell = gridRef.current.get(key);
             if(cell) {
-                for(const idx of cell) candidates.add(idx);
+                // パフォーマンス対策：近傍チェック数を制限（間引き）
+                const limit = cell.length > 50 ? 50 : cell.length; 
+                for(let k=0; k<limit; k++) candidates.add(cell[k]);
             }
         }
       }
 
-      // 2. Process Candidates
+      let alignX = 0, alignY = 0;
+      let attractX = 0, attractY = 0;
+      let repelX = 0, repelY = 0;
+      let neighborCount = 0;
+
       const avoidSq = avoidRad * avoidRad;
       const senseSq = senseRad * senseRad;
 
@@ -135,10 +145,11 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
           const seg = segmentsRef.current[idx];
           if (!seg) continue;
 
-          // Midpoint of segment
+          // 簡易距離チェック (BBox)
+          if (Math.abs(seg.x1 - tip.pos.x) > senseRad || Math.abs(seg.y1 - tip.pos.y) > senseRad) continue;
+
           const mx = (seg.x1 + seg.x2) / 2;
           const my = (seg.y1 + seg.y2) / 2;
-          
           const dx = mx - tip.pos.x;
           const dy = my - tip.pos.y;
           const dSq = dx*dx + dy*dy;
@@ -147,37 +158,25 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
               const d = Math.sqrt(dSq);
               neighborCount++;
 
-              // Alignment vector (segment orientation)
-              // Calculate segment vector
-              const segDx = seg.x2 - seg.x1;
-              const segDy = seg.y2 - seg.y1;
-              // We want to align parallel, so pick the direction closer to current heading
-              // Dot product to check orientation
-              const dot = segDx * Math.cos(tip.heading) + segDy * Math.sin(tip.heading);
-              if (dot > 0) {
-                  alignX += segDx;
-                  alignY += segDy;
-              } else {
-                  alignX -= segDx;
-                  alignY -= segDy;
-              }
-
-              // Second-Order Dynamics:
-              // If the neighbor is "stressed" (thick/knotted), it induces more stress in me.
-              // Ecological memory transfer.
-              if (seg.stressMarker > 0.3) {
-                  maxLocalStress = Math.max(maxLocalStress, seg.stressMarker);
-              }
-
+              // Repulsion (衝突回避 - 最も重要)
               if (dSq < avoidSq) {
-                  // Repulsion (too close)
-                  closeCount++;
                   const force = (avoidRad - d) / avoidRad;
-                  repelX -= (dx / d) * force;
-                  repelY -= (dy / d) * force;
-              } else {
-                  // Attraction (Curiosity/Social) - "Dance"
-                  // Only attract if not too crowded
+                  repelX -= (dx / d) * force * 3.0; // 強く反発させる
+                  repelY -= (dy / d) * force * 3.0;
+              } 
+              // Alignment & Attraction
+              else {
+                  // Alignment: 近傍のセグメントの向きに合わせる
+                  const segDx = seg.x2 - seg.x1;
+                  const segDy = seg.y2 - seg.y1;
+                  // ドット積で進行方向が近い場合のみ整列（逆走防止）
+                  const dot = segDx * Math.cos(tip.heading) + segDy * Math.sin(tip.heading);
+                  if (dot > 0) {
+                      alignX += segDx;
+                      alignY += segDy;
+                  }
+                  
+                  // Attraction: 少しだけ引き合う（束になる）
                   const force = (1 - (d / senseRad)); 
                   attractX += (dx / d) * force;
                   attractY += (dy / d) * force;
@@ -185,63 +184,43 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
           }
       }
 
-      // 3. Resolve Forces
-      let desiredHeading = tip.heading;
-      
-      // Calculate resultant vector
+      // Forces Integration
       let rx = Math.cos(tip.heading);
       let ry = Math.sin(tip.heading);
 
       if (neighborCount > 0) {
-          // Normalize accumulators (rough)
-          alignX /= neighborCount;
-          alignY /= neighborCount;
-          attractX /= neighborCount;
-          attractY /= neighborCount;
+          // Normalize & Apply
+          alignX /= neighborCount; alignY /= neighborCount;
+          attractX /= neighborCount; attractY /= neighborCount;
 
-          // Apply weights
-          rx += alignX * cfg.ALIGNMENT_FORCE * 10;
-          ry += alignY * cfg.ALIGNMENT_FORCE * 10;
+          rx += alignX * currentAlign * 20; // 整列を最優先してFlowを作る
+          ry += alignY * currentAlign * 20;
           
-          rx += attractX * cfg.ATTRACTION_FORCE * 10;
-          ry += attractY * cfg.ATTRACTION_FORCE * 10;
+          rx += attractX * cfg.ATTRACTION_FORCE * 5;
+          ry += attractY * cfg.ATTRACTION_FORCE * 5;
 
-          // Repulsion overrides everything
-          if (closeCount > 0) {
-               repelX /= closeCount;
-               repelY /= closeCount;
-               rx += repelX * cfg.REPULSION_FORCE * 20;
-               ry += repelY * cfg.REPULSION_FORCE * 20;
-          }
+          // Repulsion overrides
+          rx += repelX * cfg.REPULSION_FORCE * 50; // 反発は絶対
+          ry += repelY * cfg.REPULSION_FORCE * 50;
       }
 
-      // Calculate steer angle
+      // 目標角度へのステアリング
       const targetAngle = Math.atan2(ry, rx);
-      
-      // Diff calculation ensuring shortest turn
       let steer = targetAngle - tip.heading;
+      
+      // 最短回転方向へ
       while (steer > Math.PI) steer -= Math.PI * 2;
       while (steer < -Math.PI) steer += Math.PI * 2;
-
-      // Limit steer speed
-      steer = Math.max(-cfg.TURN_SPEED, Math.min(cfg.TURN_SPEED, steer));
-
-      // Calculate Stress Impact
-      // Interaction causes stress. 
-      // Crowding causes HIGH stress. 
-      // Existing stress in environment amplifies this.
-      let stressDelta = -cfg.STRESS_DECAY; // Default relaxation
       
-      if (neighborCount > 0) {
-          stressDelta += cfg.STRESS_ACCUMULATION; // Base interaction stress
-          if (closeCount > 0) stressDelta += cfg.STRESS_ACCUMULATION * 2; // Collision stress
-          
-          // Feedback loop: 
-          // If I am near highly stressed segments, I get stressed faster.
-          stressDelta += maxLocalStress * cfg.STRESS_ACCUMULATION * 2;
+      // 旋回速度制限
+      steer = Math.max(-currentTurn, Math.min(currentTurn, steer));
+
+      // 密度が高すぎる場合、強制的に散らす（FPS対策 & Clumping防止）
+      if (neighborCount > 20) {
+          steer += (Math.random() - 0.5) * 1.5; 
       }
 
-      return { steer, stress: stressDelta };
+      return { steer, speed: currentSpeed, neighborCount };
   };
 
   const update = () => {
@@ -255,35 +234,40 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
       const h = dimensionsRef.current.h;
       const scale = scaleRef.current;
 
-      const speed = cfg.GROWTH_SPEED * scale;
+      // 1. 天候の更新 (Math Engine)
+      const modulation = updateAtmosphere(atmosphereRef.current);
+
+      // UIへの通知（間引き）
+      if (onAtmosphereChange && Math.random() < 0.05) {
+          onAtmosphereChange(getAtmosphereDescription(atmosphereRef.current));
+      }
+
       const newSegments: TubeSegment[] = [];
       const newTipsBuffer: Tip[] = [];
       const activeTips = tipsRef.current;
 
+      // --- Tips Update Loop ---
       for (const tip of activeTips) {
           if (tip.isDead) continue;
 
-          // --- Physics & Behavior ---
-          const { steer, stress } = calculateDynamics(tip, scale);
-          
+          const { steer, speed, neighborCount } = calculateDynamics(tip, scale, modulation);
+
           // Update State
           tip.heading += steer;
-          tip.interactionStress = Math.min(1, Math.max(0, tip.interactionStress + stress));
-          
-          // --- Morphology (Character) ---
-          // Jitter/Wobble increases with stress
-          tip.wobblePhase += 0.2 + (tip.interactionStress * 0.5);
-          const wobble = Math.sin(tip.wobblePhase) * cfg.JITTER_STRENGTH * tip.interactionStress;
-          tip.heading += wobble;
+
+          // Wobble (Flowyにするため、控えめに)
+          // Stress (neighborCount) が高いほど振動する
+          tip.wobblePhase += 0.1;
+          const wobbleAmp = cfg.JITTER_STRENGTH * (0.2 + Math.min(1, neighborCount * 0.05));
+          tip.heading += Math.sin(tip.wobblePhase) * wobbleAmp;
 
           // Move
           const oldX = tip.pos.x;
           const oldY = tip.pos.y;
-          
-          tip.pos.x += Math.cos(tip.heading) * speed;
-          tip.pos.y += Math.sin(tip.heading) * speed;
+          tip.pos.x += Math.cos(tip.heading) * speed * scale;
+          tip.pos.y += Math.sin(tip.heading) * speed * scale;
 
-          // Wrap
+          // Boundary Wrap
           let wrapped = false;
           if (tip.pos.x < 0 || tip.pos.x > w || tip.pos.y < 0 || tip.pos.y > h) {
              tip.pos.x = wrap(tip.pos.x, 0, w);
@@ -292,10 +276,9 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
           }
 
           if (!wrapped) {
-              // Create Segment with Reaction History
-              // Width depends on stress (Knots/Bulges)
-              const stressWidth = tip.interactionStress * cfg.SEGMENT_WIDTH_VAR * scale;
-              const baseWidth = cfg.SEGMENT_WIDTH_BASE * scale * (1 - tip.generation * 0.05);
+              // Create Segment
+              // アトラクタの影響で太さが変わる (呼吸するように)
+              const widthMod = modulation * 2.0; 
               
               const seg: TubeSegment = {
                   id: idCounterRef.current++,
@@ -304,68 +287,57 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
                   x2: tip.pos.x,
                   y2: tip.pos.y,
                   hue: tip.hue,
-                  width: baseWidth + stressWidth,
+                  width: (cfg.SEGMENT_WIDTH_BASE + widthMod) * scale,
                   opacity: 1.0,
                   age: 0,
-                  stressMarker: tip.interactionStress
+                  stressMarker: neighborCount
               };
               newSegments.push(seg);
 
-              // Branching (Reaction -> Reaction)
-              // Probability drastically increases with stress (interaction)
-              const dynamicProb = cfg.BRANCH_PROBABILITY_BASE + (tip.interactionStress * cfg.BRANCH_STRESS_MULTIPLIER);
-              
-              if (Math.random() < dynamicProb && tip.generation < 8) {
-                  // Branch usually shoots off to side
+              // Branching
+              // 密度が低いときだけ分岐する (過密防止)
+              if (neighborCount < 5 && Math.random() < cfg.BRANCH_PROBABILITY_BASE) {
                   const branchAngle = tip.heading + (Math.random() < 0.5 ? -1 : 1) * cfg.SENSOR_ANGLE;
-                  // Stress causes color shift (Reaction visibility)
-                  const hueShift = (Math.random() - 0.5) * 0.1 + (tip.interactionStress * 0.2); 
-                  const newHue = (tip.hue + hueShift + 1) % 1.0;
-                  
-                  spawnTip(tip.pos.x, tip.pos.y, branchAngle, newHue, tip.generation + 1, newTipsBuffer);
+                  spawnTip(tip.pos.x, tip.pos.y, branchAngle, tip.hue, tip.generation + 1, newTipsBuffer);
               }
           }
 
           tip.age++;
-          // Die if too old, but stress keeps you alive longer (memory)
-          const lifeSpan = 1500 + (tip.interactionStress * 1000);
-          if (tip.age > lifeSpan) tip.isDead = true; 
+          if (tip.age > 1500) tip.isDead = true;
       }
 
       if (newTipsBuffer.length > 0) tipsRef.current.push(...newTipsBuffer);
 
-      // Add new segments
+      // Grid Update & Cleanup
+      // パフォーマンスの要: 古いセグメントを効率的に消す
+      
+      // Add new
       for (const s of newSegments) {
           const idx = segmentsRef.current.push(s) - 1;
           addToGrid(s, idx);
       }
 
-      // Cleanup
-      const totalSegments = segmentsRef.current.length;
-      if (totalSegments > cfg.MAX_SEGMENTS) {
-          const removeCount = Math.floor(totalSegments * 0.02) + 1; 
+      // Hard Limit (FPS安定化)
+      if (segmentsRef.current.length > cfg.SAFETY_SEGMENTS_LIMIT) {
+          const removeCount = 200; // 一気に消す
           segmentsRef.current.splice(0, removeCount);
+          // Grid再構築はコストが高いので、limitを超えたときだけやる
           gridRef.current.clear();
           segmentsRef.current.forEach((s, i) => addToGrid(s, i));
       }
-      
-      // Decay
-      // Use backward loop for efficient removal? Or just filter.
-      // JS filter is fine for ~5k elements.
+
+      // Decay logic
       const survivingSegments: TubeSegment[] = [];
       let rebuildGrid = false;
       
+      // 高速化のため、全件走査ではなく一定確率でスキップしてもよいが
+      // ここでは opacity でフィルタリング
+      const decayBase = cfg.DECAY_RATE * (1.0 + (1.0 - modulation) * 2.0); // アトラクタの値が低いと消えるのが早い
+
       for (const seg of segmentsRef.current) {
-          seg.age++;
-          // Stressed segments last longer (Ecological memory)
-          const decay = cfg.DECAY_RATE * (1 / (1 + seg.stressMarker * 4));
-          seg.opacity -= decay;
-          
-          if (seg.opacity > 0.02) {
-              survivingSegments.push(seg);
-          } else {
-              rebuildGrid = true;
-          }
+          seg.opacity -= decayBase;
+          if (seg.opacity > 0.05) survivingSegments.push(seg);
+          else rebuildGrid = true;
       }
       segmentsRef.current = survivingSegments;
       if (rebuildGrid) {
@@ -374,20 +346,18 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
       }
 
       tipsRef.current = tipsRef.current.filter(t => !t.isDead);
-      
-      if (tipsRef.current.length < 2) {
-          spawnTip(Math.random()*w, Math.random()*h, Math.random()*Math.PI*2, Math.random(), 0);
+
+      // Auto-Spawn if too few
+      if (tipsRef.current.length < 5) {
+          initSimulation(); // Restart fireworks
       }
 
       // Render
       ctx.fillStyle = '#050505';
-      ctx.fillRect(0, 0, w, h);
+      ctx.fillRect(0, 0, w, h); // Clear background
 
+      // Draw Segments (Tubes)
       ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-
-      // Batch drawing by style for performance? 
-      // For organic look, drawing in order is better for layering.
       
       for (const seg of segmentsRef.current) {
           ctx.beginPath();
@@ -395,24 +365,23 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
           ctx.lineTo(seg.x2, seg.y2);
           ctx.lineWidth = seg.width;
           
-          // High stress = White/Desaturated, Low stress = Color
-          // Or: High stress = more saturation?
-          // Let's make stressed areas brighter and more intense.
-          const l = 0.5 + (seg.stressMarker * 0.4); 
-          const s = 0.6 + (seg.stressMarker * 0.4);
+          // Color Logic: アトラクタの影響で色味がシフトする
+          const hueShift = modulation * 0.1;
+          const hVal = (seg.hue + hueShift) % 1;
           
-          ctx.strokeStyle = hslToRgbString(seg.hue, s, l, seg.opacity);
+          // 明度(L)を高めにして "White/Glowing" 感を出す
+          const l = 0.6 + (seg.opacity * 0.3);
+          const s = 0.4; // 彩度は低めで上品に
+
+          ctx.strokeStyle = hslToRgbString(hVal, s, l, seg.opacity);
           ctx.stroke();
       }
 
-      // Draw Tips
+      // Draw Tips (Glowing Heads)
       for (const tip of tipsRef.current) {
-          const r = (cfg.SEGMENT_WIDTH_BASE + cfg.SEGMENT_WIDTH_VAR * tip.interactionStress) * scale * 0.8;
           ctx.beginPath();
-          ctx.arc(tip.pos.x, tip.pos.y, Math.max(1, r), 0, Math.PI * 2);
-          // Tips glow white when stressed
-          const l = 0.5 + (tip.interactionStress * 0.5);
-          ctx.fillStyle = hslToRgbString(tip.hue, 1.0, l, 1.0);
+          ctx.arc(tip.pos.x, tip.pos.y, 2 * scale, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255, 255, 255, 0.9)`; // 純白のヘッド
           ctx.fill();
       }
 
@@ -428,19 +397,12 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
         canvasRef.current.width = w;
         canvasRef.current.height = h;
         dimensionsRef.current = { w, h };
-        const diagonal = Math.sqrt(w*w + h*h);
-        scaleRef.current = Math.max(0.5, Math.min(2.5, diagonal / 1200));
+        scaleRef.current = Math.max(0.5, Math.min(2.5, Math.sqrt(w*w + h*h) / 1500));
         initSimulation();
     });
 
-    if (containerRef.current) {
-        resizeObserver.observe(containerRef.current);
-    }
+    if (containerRef.current) resizeObserver.observe(containerRef.current);
     
-    setTimeout(() => {
-        if (tipsRef.current.length === 0) initSimulation();
-    }, 100);
-
     frameIdRef.current = requestAnimationFrame(update);
     return () => {
         cancelAnimationFrame(frameIdRef.current);
@@ -453,8 +415,11 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    for(let i=0; i<3; i++) {
-        spawnTip(x, y, Math.random()*Math.PI*2, Math.random(), 0);
+    
+    // 花火クリック
+    const hue = Math.random();
+    for(let i=0; i<8; i++) {
+        spawnTip(x, y, (Math.PI * 2 * i) / 8 + Math.random(), hue, 0);
     }
   };
 
@@ -465,9 +430,6 @@ const SimulationCanvas: React.FC<Props> = ({ config }) => {
         onClick={handleCanvasClick}
         className="w-full h-full block"
       />
-      <div className="absolute top-4 left-6 pointer-events-none select-none opacity-50 mix-blend-difference">
-        <h1 className="text-white text-xs tracking-[0.2em] font-light uppercase">Neural Garden</h1>
-      </div>
     </div>
   );
 };

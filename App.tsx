@@ -1,38 +1,41 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import SimulationCanvas from './components/SimulationCanvas';
 import { CONFIG } from './constants';
 import { SimulationConfig } from './types';
 
 // Helper to define slider ranges
 const CONTROLS: Array<{ key: keyof SimulationConfig; min: number; max: number; step: number; label: string }> = [
-  { key: 'NUM_ROOTS', min: 1, max: 20, step: 1, label: 'Roots' },
-  { key: 'MAX_TIPS', min: 20, max: 200, step: 10, label: 'Max Active Tips' },
-  { key: 'GROWTH_SPEED', min: 0.1, max: 5, step: 0.1, label: 'Speed' },
-  
-  // Relational
-  { key: 'ATTRACTION_FORCE', min: 0, max: 0.2, step: 0.001, label: 'Curiosity (Attraction)' },
-  { key: 'ALIGNMENT_FORCE', min: 0, max: 0.2, step: 0.001, label: 'Flow (Alignment)' },
-  { key: 'REPULSION_FORCE', min: 0, max: 1.0, step: 0.01, label: 'Privacy (Repulsion)' },
+  { key: 'SAFETY_TIPS_LIMIT', min: 100, max: 1000, step: 10, label: 'Max Active Tips' },
+  { key: 'SAFETY_SEGMENTS_LIMIT', min: 1000, max: 10000, step: 100, label: 'Max Segments' },
 
-  // Morphology
-  { key: 'STRESS_ACCUMULATION', min: 0, max: 0.2, step: 0.001, label: 'Reaction Sensitivity' },
-  { key: 'STRESS_DECAY', min: 0, max: 0.1, step: 0.001, label: 'Relaxation Rate' },
-  { key: 'JITTER_STRENGTH', min: 0, max: 2.0, step: 0.01, label: 'Wobble Intensity' },
-  { key: 'SEGMENT_WIDTH_VAR', min: 0, max: 10, step: 0.1, label: 'Stress Width Impact' },
+  { key: 'GROWTH_SPEED', min: 0.2, max: 5, step: 0.1, label: 'Growth Speed' },
+  { key: 'TURN_SPEED', min: 0.01, max: 0.5, step: 0.01, label: 'Turn Speed' },
   
-  // Lifecycle
-  { key: 'BRANCH_PROBABILITY_BASE', min: 0, max: 0.05, step: 0.0001, label: 'Base Branching' },
-  { key: 'BRANCH_STRESS_MULTIPLIER', min: 0, max: 0.2, step: 0.001, label: 'Reactive Branching' },
-  { key: 'DECAY_RATE', min: 0.0001, max: 0.01, step: 0.0001, label: 'Fade Rate' },
+  { key: 'ALIGNMENT_FORCE', min: 0, max: 0.2, step: 0.001, label: 'Alignment (Flow)' },
+  { key: 'ATTRACTION_FORCE', min: 0, max: 0.1, step: 0.001, label: 'Attraction (Curiosity)' },
+  { key: 'REPULSION_FORCE', min: 0, max: 0.5, step: 0.01, label: 'Repulsion (Space)' },
+  
+  { key: 'BRANCH_PROBABILITY_BASE', min: 0, max: 0.05, step: 0.001, label: 'Base Branching' },
+  { key: 'BRANCH_STRESS_MULTIPLIER', min: 0, max: 0.2, step: 0.001, label: 'Stress Branching' },
+  
+  { key: 'STRESS_ACCUMULATION', min: 0, max: 0.2, step: 0.001, label: 'Reaction Sensitivity' },
+  { key: 'JITTER_STRENGTH', min: 0, max: 2.0, step: 0.01, label: 'Wobble Intensity' },
+  
+  { key: 'DECAY_RATE', min: 0.0001, max: 0.01, step: 0.0001, label: 'Decay Rate' },
 ];
 
 const App: React.FC = () => {
   const [config, setConfig] = useState<SimulationConfig>(CONFIG);
-  const [isDebugOpen, setIsDebugOpen] = useState(false);
+  const [isDebugOpen, setIsDebugOpen] = useState(true);
+  const [atmosphere, setAtmosphere] = useState<string[]>([]);
 
   const handleUpdate = (key: keyof SimulationConfig, value: number) => {
     setConfig(prev => ({ ...prev, [key]: value }));
   };
+
+  const handleAtmosphereChange = useCallback((descriptors: string[]) => {
+    setAtmosphere(descriptors);
+  }, []);
 
   const copyConfig = () => {
     navigator.clipboard.writeText(JSON.stringify(config, null, 2));
@@ -40,15 +43,29 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="w-screen h-screen bg-[#050505] overflow-hidden relative">
-      <SimulationCanvas config={config} />
+    <div className="w-screen h-screen bg-[#050505] overflow-hidden relative selection:bg-none">
+      <SimulationCanvas config={config} onAtmosphereChange={handleAtmosphereChange} />
+      
+      {/* Atmosphere Monitor (Bottom Left) */}
+      <div className="absolute bottom-8 left-8 pointer-events-none select-none mix-blend-difference z-0">
+        <h1 className="text-white/40 text-xs tracking-[0.3em] font-light uppercase mb-2">
+          Atmosphere
+        </h1>
+        <div className="flex gap-4">
+          {atmosphere.map((tag, i) => (
+            <span key={i} className="text-white/80 text-sm font-light tracking-widest uppercase">
+              {tag}
+            </span>
+          ))}
+        </div>
+      </div>
       
       {/* Debug Toggle */}
       <button 
         onClick={() => setIsDebugOpen(!isDebugOpen)}
-        className="absolute top-4 right-4 z-50 bg-white/10 hover:bg-white/20 text-white p-2 rounded backdrop-blur-sm transition-colors"
+        className="absolute top-4 right-4 z-50 bg-white/10 hover:bg-white/20 text-white p-2 rounded backdrop-blur-sm transition-colors text-xs uppercase tracking-widest"
       >
-        {isDebugOpen ? 'Close Debug' : 'Debug'}
+        {isDebugOpen ? 'Hide Controls' : 'Controls'}
       </button>
 
       {/* Debug Panel */}
@@ -60,7 +77,7 @@ const App: React.FC = () => {
               onClick={copyConfig}
               className="text-xs bg-emerald-600/50 hover:bg-emerald-600 px-2 py-1 rounded"
             >
-              Copy JSON
+              Copy
             </button>
           </div>
           

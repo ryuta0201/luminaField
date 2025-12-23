@@ -1,3 +1,5 @@
+// ryuta0201/luminafield/luminaField.../types.ts
+
 export interface Vector {
   x: number;
   y: number;
@@ -6,14 +8,13 @@ export interface Vector {
 export interface Tip {
   id: number;
   pos: Vector;
-  heading: number; // Radians
-  hue: number; // 0-1
-  energy: number; // 0-1
+  heading: number;
+  hue: number;
+  energy: number;
   age: number;
   generation: number;
   isDead: boolean;
-  // Morphology / History state
-  interactionStress: number; // 0-1, accumulates when interacting
+  interactionStress: number;
   wobblePhase: number;
 }
 
@@ -27,45 +28,45 @@ export interface TubeSegment {
   width: number;
   opacity: number;
   age: number;
-  stressMarker: number; // Stored stress level at creation
+  stressMarker: number;
+}
+
+// 数学的な変調器のタイプ定義
+export type AtmosphereMode = 'LORENZ' | 'SINE_WAVE' | 'ROESSLER' | 'NOISE';
+
+export interface AtmosphereState {
+  mode: AtmosphereMode;
+  val1: number; // 汎用変数 (x)
+  val2: number; // 汎用変数 (y)
+  val3: number; // 汎用変数 (z)
+  t: number;
 }
 
 export interface SimulationConfig {
-  // System
-  NUM_ROOTS: number;
-  ROOT_TIPS_COUNT: number;
-  MAX_SEGMENTS: number;
-  MAX_TIPS: number;
+  // System Limits
+  SAFETY_TIPS_LIMIT: number;
+  SAFETY_SEGMENTS_LIMIT: number;
   
-  // Physics / Behavior
+  // Dynamic Parameters (Base values)
   GROWTH_SPEED: number;
   TURN_SPEED: number;
+  ALIGNMENT_FORCE: number; 
+  ATTRACTION_FORCE: number;
+  REPULSION_FORCE: number;
+  
+  // Static Configuration
   SENSOR_DIST: number;
-  SENSOR_ANGLE: number; // Used for branching angle mainly
-  
-  // Relational Dynamics
-  ALIGNMENT_FORCE: number; // Tendency to flow with others
-  ATTRACTION_FORCE: number; // Tendency to move towards others (curiosity)
-  REPULSION_FORCE: number; // Personal space
-  
-  // Morphology (Character)
-  STRESS_ACCUMULATION: number; // How fast interactions change the tube form
-  STRESS_DECAY: number; // How fast it relaxes back to straight/thin
-  JITTER_STRENGTH: number; // How much stress causes wobbly movement
+  SENSOR_ANGLE: number;
+  STRESS_ACCUMULATION: number;
+  STRESS_DECAY: number;
+  JITTER_STRENGTH: number;      // "Flowy"にするため、これを低く、Noiseを高くする
   BRANCH_PROBABILITY_BASE: number;
-  BRANCH_STRESS_MULTIPLIER: number; // Stressed tubes branch more
-
+  BRANCH_STRESS_MULTIPLIER: number;
+  
   // Visuals
   SEGMENT_WIDTH_BASE: number;
-  SEGMENT_WIDTH_VAR: number; // How much stress expands the width
+  SEGMENT_WIDTH_VAR: number;
   BASE_OPACITY: number;
-  DECAY_RATE: number;
-  
-  // Interaction
+  DECAY_RATE: number;           // 軌跡が消える速さ
   SAMPLE_RADIUS: number;
-}
-
-export enum SimulationState {
-  ACTIVE,
-  STAGNANT
 }
