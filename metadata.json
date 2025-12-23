@@ -1,0 +1,5 @@
+{
+  "name": "Lumina Field",
+  "description": "A minimal, continuous, agent-based ecosystem simulation where color and movement emerge from local interactions.",
+  "requestFramePermissions": []
+}
